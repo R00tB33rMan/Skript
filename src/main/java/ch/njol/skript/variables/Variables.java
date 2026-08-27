@@ -47,7 +47,7 @@ import java.util.TreeMap;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -476,13 +476,14 @@ public class Variables {
 				variablesLock.readLock().lock();
 				// Prevent race conditions from returning variables with incorrect values
 				if (!changeQueue.isEmpty()) {
-					// Gets the last VariableChange made
-					VariableChange variableChange = changeQueue.stream()
-							.filter(change -> change.name.equals(n))
-							.reduce((first, second) -> second)
-									// Gets last value, as iteration is from head to tail,
-									//  and adding occurs at the tail (and we want the most recently added)
-							.orElse(null);
+					// Gets the last VariableChange made, as iteration is from head to tail and adding
+					// occurs at the tail (and we want the most recently added). A loop rather than a
+					// stream: this runs on every global variable read the queue is not empty for.
+					VariableChange variableChange = null;
+					for (VariableChange change : changeQueue) {
+						if (change.name.equals(n))
+							variableChange = change;
+					}
 
 					if (variableChange != null) {
 						return variableChange.value;
@@ -847,7 +848,8 @@ public class Variables {
 				for (VariablesStorage variablesStorage : STORAGES)
 					variablesStorage.allLoaded();
 
-				Skript.debug("Variables set. Queue size = " + saveQueue.size());
+				if (Skript.debug())
+					Skript.debug("Variables set. Queue size = " + saveQueue.size());
 
 				return unstoredVariables;
 			} finally {
@@ -910,7 +912,11 @@ public class Variables {
 	 * The queue of serialized variables that have not yet been written
 	 * to the storage.
 	 */
-	static final BlockingQueue<SerializedVariable> saveQueue = new LinkedBlockingQueue<>();
+	// LinkedTransferQueue rather than LinkedBlockingQueue: every add to the latter locks and signals
+	// the parked save thread, which was the single most expensive thing about setting a variable.
+	// A transfer queue appends lock-free and its consumer spins briefly before parking, so the common
+	// case costs the calling tick thread nothing but the append.
+	static final BlockingQueue<SerializedVariable> saveQueue = new LinkedTransferQueue<>();
 
 	/**
 	 * Whether the {@link #saveThread} should be stopped.
@@ -953,7 +959,7 @@ public class Variables {
 		}
 
 		// First, make sure all variables are saved
-		while (saveQueue.size() > 0) {
+		while (!saveQueue.isEmpty()) {
 			try {
 				Thread.sleep(10);
 			} catch (InterruptedException ignored) {}

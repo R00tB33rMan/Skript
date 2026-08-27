@@ -90,17 +90,28 @@ public class CondCompare extends Condition implements VerboseAssert {
 	private Comparator comparator;
 
 	/**
+	 * A comparator resolved for one pair of value types, and the pair it was resolved for.
+	 *
+	 * @param firstType The class of the left-hand value it was resolved for.
+	 * @param secondType The class of the right-hand value it was resolved for.
+	 * @param comparator The comparator for that pair, or null if the pair has none.
+	 */
+	@SuppressWarnings("rawtypes")
+	private record ResolvedComparator(Class<?> firstType, Class<?> secondType, @Nullable Comparator comparator) { }
+
+	/**
 	 * A one-entry cache of the last comparator {@link #compare(Object, Object)} resolved, for when
 	 * {@link #comparator} could not be determined at parse time.
 	 * <p>
 	 * Resolving walks two concurrent maps, and a comparison runs once per pair of values - but the
 	 * pair of classes involved almost never changes between runs of the same condition, so a pair of
-	 * reference comparisons answers it instead. The three fields are only ever written together and
-	 * only read on the thread that wrote them, so a torn read cannot pick the wrong comparator.
+	 * reference comparisons answers it instead. A trigger can run on more than one thread at a time,
+	 * so the pair and the comparator it belongs to are held together behind a single reference: a
+	 * racing thread then reads a whole entry for some other pair and simply resolves its own, rather
+	 * than reading one pair's types alongside another pair's comparator.
 	 */
-	@SuppressWarnings("rawtypes")
-	private Comparator cachedComparator;
-	private Class<?> cachedFirstType, cachedSecondType;
+	@Nullable
+	private ResolvedComparator cachedComparator;
 
 	/**
 	 * Determines the {@link Relation} between two values, using the parse-time comparator if there is
@@ -118,13 +129,13 @@ public class CondCompare extends Condition implements VerboseAssert {
 			return Relation.EQUAL;
 
 		Class<?> firstType = first.getClass(), secondType = second.getClass();
-		if (firstType != cachedFirstType || secondType != cachedSecondType) {
-			cachedComparator = Comparators.getComparator(firstType, secondType);
-			cachedFirstType = firstType;
-			cachedSecondType = secondType;
+		ResolvedComparator cached = this.cachedComparator;
+		if (cached == null || cached.firstType() != firstType || cached.secondType() != secondType) {
+			cached = new ResolvedComparator(firstType, secondType, Comparators.getComparator(firstType, secondType));
+			this.cachedComparator = cached;
 		}
 
-		Comparator<Object, Object> resolved = cachedComparator;
+		Comparator<Object, Object> resolved = cached.comparator();
 		return resolved == null ? Relation.NOT_EQUAL : resolved.compare(first, second);
 	}
 

@@ -72,10 +72,12 @@ public class ExprElement<T> extends SimpleExpression<T> implements KeyProviderEx
 			return Iterators.forArray(CollectionUtils.subarray(array, array.length - index, array.length));
 		}),
 		RANDOM(iterator -> {
-			Object[] array = Iterators.toArray(iterator, Object.class);
-			if (array.length == 0)
+			// a list, not Iterators.toArray: that builds an ArrayList and then copies it into an array,
+			// and picking one element never needs the second copy
+			List<Object> elements = Lists.newArrayList(iterator);
+			if (elements.isEmpty())
 				return EmptyIterator.get();
-			Object element = CollectionUtils.getRandom(array);
+			Object element = elements.get(ThreadLocalRandom.current().nextInt(elements.size()));
 			return Iterators.singletonIterator(element);
 		}),
 		RANDOM_ELEMENTS((iterator, amount) -> {

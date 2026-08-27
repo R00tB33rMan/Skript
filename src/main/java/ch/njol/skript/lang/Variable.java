@@ -386,7 +386,9 @@ public class Variable<T> implements Expression<T>, KeyReceiverExpression<T>, Key
 	 * as a new player object has been created by the server.
 	 */
 	public static <T> @Nullable T convertIfOldPlayer(String key, boolean local, Event event, @Nullable T object) {
-		if (SkriptConfig.enablePlayerVariableFix.value() && object instanceof Player oldPlayer) {
+		// type check first: this runs on every non-list variable read, and almost none of them hold a
+		// player, so the config read is the more expensive half of the test to reach
+		if (object instanceof Player oldPlayer && SkriptConfig.enablePlayerVariableFix.value()) {
 			if (!oldPlayer.isValid() && oldPlayer.isOnline()) {
 				Player newPlayer = Bukkit.getPlayer(oldPlayer.getUniqueId());
 				Variables.setVariable(key, newPlayer, event, local);

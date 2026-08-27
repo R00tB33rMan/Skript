@@ -2,12 +2,12 @@ package org.skriptlang.skript.lang.converter;
 
 import ch.njol.skript.Skript;
 import ch.njol.skript.SkriptAPIException;
-import ch.njol.util.Pair;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 
 import java.lang.reflect.Array;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Converters are used to provide Skript with specific instructions for converting an object to a different type.
@@ -39,7 +39,18 @@ public final class Converters {
 	 * Some pairs may point to a null value, indicating that no converter exists between the two types.
 	 * This is useful for skipping complex lookups that may require chaining.
 	 */
-	private static final Map<Pair<Class<?>, Class<?>>, ConverterInfo<?, ?>> QUICK_ACCESS_CONVERTERS = new HashMap<>(50);
+	private static final Map<Class<?>, Map<Class<?>, ConverterInfo<?, ?>>> QUICK_ACCESS_CONVERTERS = new ConcurrentHashMap<>(50);
+
+	/**
+	 * Stands in for "no converter exists between these two types" in {@link #QUICK_ACCESS_CONVERTERS},
+	 * which cannot hold a null value. It is never returned to a caller and never invoked.
+	 */
+	private static final ConverterInfo<?, ?> NO_CONVERTER = new ConverterInfo<>(
+		Object.class,
+		Object.class,
+		from -> null,
+		0
+	);
 
 	/**
 	 * Registers a new Converter with Skript's collection of Converters.
@@ -221,19 +232,17 @@ public final class Converters {
 	public static <F, T> ConverterInfo<F, T> getConverterInfo(Class<F> fromType, Class<T> toType) {
 		assertIsDoneLoading();
 
-		Pair<Class<?>, Class<?>> pair = new Pair<>(fromType, toType);
-		ConverterInfo<F, T> converter;
+		// nested rather than keyed by a pair so that a hit - which is nearly every call - allocates nothing
+		Map<Class<?>, ConverterInfo<?, ?>> byToType =
+			QUICK_ACCESS_CONVERTERS.computeIfAbsent(fromType, type -> new ConcurrentHashMap<>());
 
-		synchronized (QUICK_ACCESS_CONVERTERS) {
-			if (QUICK_ACCESS_CONVERTERS.containsKey(pair)) {
-				converter = (ConverterInfo<F, T>) QUICK_ACCESS_CONVERTERS.get(pair);
-			} else { // Compute QUICK_ACCESS for provided types
-				converter = getConverterInfo_i(fromType, toType);
-				QUICK_ACCESS_CONVERTERS.put(pair, converter);
-			}
+		ConverterInfo<?, ?> converter = byToType.get(toType);
+		if (converter == null) { // Compute QUICK_ACCESS for provided types
+			converter = getConverterInfo_i(fromType, toType);
+			byToType.put(toType, converter == null ? NO_CONVERTER : converter);
 		}
 
-		return converter;
+		return converter == NO_CONVERTER ? null : (ConverterInfo<F, T>) converter;
 	}
 
 	/**
