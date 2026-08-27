@@ -27,6 +27,12 @@ class CompoundConditional<T> implements Conditional<T> {
 	private final Operator operator;
 
 	/**
+	 * {@link #componentConditionals} as an array, so that evaluating does not allocate a set iterator.
+	 * Rebuilt whenever the set is written to.
+	 */
+	private Conditional<T>[] components;
+
+	/**
 	 * Whether a cache will be used during evaluation. True if this compound contains other compounds, otherwise false.
 	 */
 	private boolean useCache;
@@ -46,6 +52,12 @@ class CompoundConditional<T> implements Conditional<T> {
 		this.componentConditionals.addAll(conditionals);
 		useCache = conditionals.stream().anyMatch(cond -> cond instanceof CompoundConditional);
 		this.operator = operator;
+		rebuildComponents();
+	}
+
+	@SuppressWarnings("unchecked")
+	private void rebuildComponents() {
+		components = componentConditionals.toArray(new Conditional[0]);
 	}
 
 	/**
@@ -70,30 +82,37 @@ class CompoundConditional<T> implements Conditional<T> {
 
 	@Override
 	public Kleenean evaluate(T context, Map<Conditional<T>, Kleenean> cache) {
+		Conditional<T>[] components = this.components;
 		Kleenean result;
 		return switch (operator) {
 			case OR -> {
 				result = Kleenean.FALSE;
-				for (Conditional<T> conditional : componentConditionals) {
+				for (Conditional<T> conditional : components) {
+					// once one component is TRUE the rest cannot change the answer, and evaluating them
+					// anyway means running whole conditions - expressions and all - for nothing
+					if (result.isTrue())
+						break;
 					result = conditional.evaluateOr(result, context, cache);
 				}
 				yield result;
 			}
 			case AND -> {
 				result = Kleenean.TRUE;
-				for (Conditional<T> conditional : componentConditionals) {
+				for (Conditional<T> conditional : components) {
+					// evaluateAnd already refuses to evaluate past a FALSE; stopping here additionally
+					// skips walking the remaining components
+					if (result.isFalse())
+						break;
 					result = conditional.evaluateAnd(result, context, cache);
 				}
 				yield result;
 			}
 			case NOT -> {
-				if (componentConditionals.size() > 1)
+				if (components.length > 1)
 					throw new IllegalStateException("Cannot apply NOT to multiple conditionals! Cannot evaluate.");
-				// best workaround since getFirst is java 21
-				for (Conditional<T> conditional : componentConditionals) {
-					yield conditional.evaluate(context, cache).not();
-				}
-				throw new IllegalStateException("Cannot apply NOT to zero conditionals! Cannot evaluate.");
+				if (components.length == 0)
+					throw new IllegalStateException("Cannot apply NOT to zero conditionals! Cannot evaluate.");
+				yield components[0].evaluate(context, cache).not();
 			}
 		};
 	}
@@ -126,6 +145,7 @@ class CompoundConditional<T> implements Conditional<T> {
 	public void addConditionals(Collection<Conditional<T>> conditionals) {
 		componentConditionals.addAll(conditionals);
 		useCache |= conditionals.stream().anyMatch(cond -> cond instanceof CompoundConditional);
+		rebuildComponents();
 	}
 
 	//TODO: replace event with context object in debuggable rework pr

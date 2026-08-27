@@ -43,8 +43,14 @@ public interface Conditional<T> extends Debuggable {
 	default Kleenean evaluate(T context, @Nullable Map<Conditional<T>, Kleenean> cache) {
 		if (cache == null)
 			return evaluate(context);
-		//noinspection DataFlowIssue
-		return cache.computeIfAbsent(this, cond -> cond.evaluate(context));
+		// get/put rather than computeIfAbsent: the mapping function would have to capture 'context',
+		// which allocates a new lambda on every evaluation of every component conditional
+		Kleenean cached = cache.get(this);
+		if (cached != null)
+			return cached;
+		Kleenean evaluated = evaluate(context);
+		cache.put(this, evaluated);
+		return evaluated;
 	}
 
 	/**

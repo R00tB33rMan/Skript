@@ -89,6 +89,45 @@ public class CondCompare extends Condition implements VerboseAssert {
 	@SuppressWarnings("rawtypes")
 	private Comparator comparator;
 
+	/**
+	 * A one-entry cache of the last comparator {@link #compare(Object, Object)} resolved, for when
+	 * {@link #comparator} could not be determined at parse time.
+	 * <p>
+	 * Resolving walks two concurrent maps, and a comparison runs once per pair of values - but the
+	 * pair of classes involved almost never changes between runs of the same condition, so a pair of
+	 * reference comparisons answers it instead. The three fields are only ever written together and
+	 * only read on the thread that wrote them, so a torn read cannot pick the wrong comparator.
+	 */
+	@SuppressWarnings("rawtypes")
+	private Comparator cachedComparator;
+	private Class<?> cachedFirstType, cachedSecondType;
+
+	/**
+	 * Determines the {@link Relation} between two values, using the parse-time comparator if there is
+	 * one and otherwise resolving (and caching) one for the values' types.
+	 */
+	@SuppressWarnings("unchecked")
+	private Relation compare(Object first, Object second) {
+		Comparator<Object, Object> comparator = this.comparator;
+		if (comparator != null)
+			return comparator.compare(first, second);
+
+		if (first == null || second == null)
+			return Relation.NOT_EQUAL;
+		if (first == second)
+			return Relation.EQUAL;
+
+		Class<?> firstType = first.getClass(), secondType = second.getClass();
+		if (firstType != cachedFirstType || secondType != cachedSecondType) {
+			cachedComparator = Comparators.getComparator(firstType, secondType);
+			cachedFirstType = firstType;
+			cachedSecondType = secondType;
+		}
+
+		Comparator<Object, Object> resolved = cachedComparator;
+		return resolved == null ? Relation.NOT_EQUAL : resolved.compare(first, second);
+	}
+
 	@Override
 	public boolean init(final Expression<?>[] vars, final int matchedPattern, final Kleenean isDelayed, final ParseResult parser) {
 		first = vars[0];
@@ -325,41 +364,91 @@ public class CondCompare extends Condition implements VerboseAssert {
 				second.getAnd() && !second.isSingle())
 			return compareLists(event);
 
-		return first.check(event, (Predicate<Object>) o1 ->
-			second.check(event, (Predicate<Object>) o2 -> {
-				if (third == null)
-					return relation.isImpliedBy(comparator != null ? comparator.compare(o1, o2) : Comparators.compare(o1, o2));
-				return third.check(event, (Predicate<Object>) o3 -> {
-					boolean isBetween;
-					if (comparator != null) {
-						if (o1 instanceof Cyclical<?> && o2 instanceof Cyclical<?> && o3 instanceof Cyclical<?>) {
-							if (Relation.GREATER_OR_EQUAL.isImpliedBy(comparator.compare(o2, o3)))
-								isBetween = Relation.GREATER_OR_EQUAL.isImpliedBy(comparator.compare(o1, o2)) || Relation.SMALLER_OR_EQUAL.isImpliedBy(comparator.compare(o1, o3));
-							else
-								isBetween = Relation.GREATER_OR_EQUAL.isImpliedBy(comparator.compare(o1, o2)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(comparator.compare(o1, o3));
-						} else {
-							isBetween =
-								(Relation.GREATER_OR_EQUAL.isImpliedBy(comparator.compare(o1, o2)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(comparator.compare(o1, o3)))
-								// Check OPPOSITE (switching o2 / o3)
-								|| (Relation.GREATER_OR_EQUAL.isImpliedBy(comparator.compare(o1, o3)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(comparator.compare(o1, o2)));
-						}
-					} else {
-						if (o1 instanceof Cyclical<?> && o2 instanceof Cyclical<?> && o3 instanceof Cyclical<?>) {
-							if (Relation.GREATER_OR_EQUAL.isImpliedBy(Comparators.compare(o2, o3)))
-								isBetween = Relation.GREATER_OR_EQUAL.isImpliedBy(Comparators.compare(o1, o2)) || Relation.SMALLER_OR_EQUAL.isImpliedBy(Comparators.compare(o1, o3));
-							else
-								isBetween = Relation.GREATER_OR_EQUAL.isImpliedBy(Comparators.compare(o1, o2)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(Comparators.compare(o1, o3));
-						} else {
-							isBetween =
-									(Relation.GREATER_OR_EQUAL.isImpliedBy(Comparators.compare(o1, o2)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(Comparators.compare(o1, o3)))
-									// Check OPPOSITE (switching o2 / o3)
-									|| (Relation.GREATER_OR_EQUAL.isImpliedBy(Comparators.compare(o1, o3)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(Comparators.compare(o1, o2)));
-						}
-					}
-					return relation == Relation.NOT_EQUAL ^ isBetween;
-				});
+		// The checkers are reused across every value rather than captured per value: 'first' can hold a
+		// whole list, and the old nesting allocated a fresh lambda for 'second' (and another for
+		// 'third') on every one of its elements.
+		if (third == null) {
+			BinaryChecker checker = new BinaryChecker();
+			return first.check(event, (Predicate<Object>) o1 -> {
+				checker.first = o1;
+				return second.check(event, checker);
+			}, isNegated());
+		}
+
+		BetweenChecker betweenChecker = new BetweenChecker(event, third);
+		return first.check(event, (Predicate<Object>) o1 -> {
+			betweenChecker.first = o1;
+			return second.check(event, betweenChecker);
+		}, isNegated());
+	}
+
+	/**
+	 * Tests {@link #relation} between the value of {@link CondCompare#first} currently being checked
+	 * and each value of {@link CondCompare#second}.
+	 */
+	private final class BinaryChecker implements Predicate<Object> {
+
+		private Object first;
+
+		@Override
+		public boolean test(Object second) {
+			return relation.isImpliedBy(compare(first, second));
+		}
+
+	}
+
+	/**
+	 * Runs {@link ThirdChecker} over {@link CondCompare#third} for each value of
+	 * {@link CondCompare#second}.
+	 */
+	private final class BetweenChecker implements Predicate<Object> {
+
+		private final Event event;
+		private final Expression<?> third;
+		private final ThirdChecker checker = new ThirdChecker();
+
+		private Object first;
+
+		private BetweenChecker(Event event, Expression<?> third) {
+			this.event = event;
+			this.third = third;
+		}
+
+		@Override
+		public boolean test(Object second) {
+			checker.first = first;
+			checker.second = second;
+			return third.check(event, checker);
+		}
+
+	}
+
+	/**
+	 * Tests whether the current value of {@link CondCompare#first} lies between the current value of
+	 * {@link CondCompare#second} and each value of {@link CondCompare#third}.
+	 */
+	private final class ThirdChecker implements Predicate<Object> {
+
+		private Object first, second;
+
+		@Override
+		public boolean test(Object third) {
+			Object first = this.first, second = this.second;
+			boolean isBetween;
+			if (first instanceof Cyclical<?> && second instanceof Cyclical<?> && third instanceof Cyclical<?>) {
+				if (Relation.GREATER_OR_EQUAL.isImpliedBy(compare(second, third)))
+					isBetween = Relation.GREATER_OR_EQUAL.isImpliedBy(compare(first, second)) || Relation.SMALLER_OR_EQUAL.isImpliedBy(compare(first, third));
+				else
+					isBetween = Relation.GREATER_OR_EQUAL.isImpliedBy(compare(first, second)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(compare(first, third));
+			} else {
+				isBetween =
+					(Relation.GREATER_OR_EQUAL.isImpliedBy(compare(first, second)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(compare(first, third)))
+					// Check OPPOSITE (switching second / third)
+					|| (Relation.GREATER_OR_EQUAL.isImpliedBy(compare(first, third)) && Relation.SMALLER_OR_EQUAL.isImpliedBy(compare(first, second)));
 			}
-		), isNegated());
+			return relation == Relation.NOT_EQUAL ^ isBetween;
+		}
+
 	}
 
 	public String getExpectedMessage(Event event) {
@@ -392,7 +481,7 @@ public class CondCompare extends Condition implements VerboseAssert {
 		if (first.length != second.length)
 			return !shouldMatch;
 		for (int i = 0; i < first.length; i++) {
-			if (!relation.isImpliedBy(comparator != null ? comparator.compare(first[i], second[i]) : Comparators.compare(first[i], second[i])))
+			if (!relation.isImpliedBy(compare(first[i], second[i])))
 				return !shouldMatch;
 		}
 		return shouldMatch;

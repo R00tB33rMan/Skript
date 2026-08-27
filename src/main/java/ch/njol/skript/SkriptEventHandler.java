@@ -139,7 +139,10 @@ public final class SkriptEventHandler {
 		// So the time will be logged even if no triggers pass check(), which is still useful information.
 		logEventStart(event, priority);
 
-		for (Trigger trigger : triggers) {
+		// indexed rather than an enhanced for: the list is immutable and random access, so this is the
+		// one iterator allocation per dispatched event that we can simply not make
+		for (int i = 0, size = triggers.size(); i < size; i++) {
+			Trigger trigger = triggers.get(i);
 			SkriptEvent triggerEvent = trigger.getEvent();
 
 			// check if the trigger is at the right priority
@@ -205,25 +208,46 @@ public final class SkriptEventHandler {
 	 * @param event The Event to execute the Trigger with.
 	 */
 	private static void execute(Trigger trigger, Event event) {
-		// these methods need to be run on whatever thread the trigger is
-		Runnable execute = () -> {
-			logTriggerStart(trigger);
-			Object timing = SkriptTimings.start(trigger.getDebugLabel());
-			trigger.execute(event);
-			SkriptTimings.stop(timing);
-			logTriggerEnd(trigger);
-		};
+		SkriptEvent skriptEvent = trigger.getEvent();
 
-		if (trigger.getEvent().canExecuteAsynchronously()) {
-			if (trigger.getEvent().check(event))
-				execute.run();
-		} else { // Ensure main thread
-			Task.callSync(() -> {
-				if (trigger.getEvent().check(event))
-					execute.run();
-				return null; // we don't care about a return value
-			});
+		if (skriptEvent.canExecuteAsynchronously()) {
+			if (skriptEvent.check(event))
+				run(trigger, event);
+			return;
 		}
+
+		// Ensure main thread. Nearly every dispatch already is on it, and handing the work to callSync
+		// from there only costs two capturing lambdas and a hop through Bukkit's scheduler API to end
+		// up back here - so run it directly, keeping callSync's reporting of anything check() throws.
+		if (Bukkit.isPrimaryThread()) {
+			try {
+				if (skriptEvent.check(event))
+					run(trigger, event);
+			} catch (Exception e) {
+				Skript.exception(e);
+			}
+			return;
+		}
+
+		Task.callSync(() -> {
+			if (skriptEvent.check(event))
+				run(trigger, event);
+			return null; // we don't care about a return value
+		});
+	}
+
+	/**
+	 * Runs the provided Trigger, logging and timing it. Must be called on the thread the Trigger runs on.
+	 *
+	 * @param trigger The Trigger to run.
+	 * @param event The Event to run the Trigger with.
+	 */
+	private static void run(Trigger trigger, Event event) {
+		logTriggerStart(trigger);
+		Object timing = SkriptTimings.start(trigger.getDebugLabel());
+		trigger.execute(event);
+		SkriptTimings.stop(timing);
+		logTriggerEnd(trigger);
 	}
 
 
