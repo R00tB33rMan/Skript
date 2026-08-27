@@ -61,19 +61,42 @@ public class BlockUtils {
 	
 	/**
 	 * @param b A block
-	 * @return Location of the block, including its direction
+	 * @return Location of the block, including its direction.
+	 *  The direction is omitted for a block whose chunk is not loaded, as reading it would block
+	 *  the server on a synchronous chunk load.
 	 */
 	@Nullable
 	public static Location getLocation(@Nullable Block b) {
 		if (b == null)
 			return null;
 		Location l = b.getLocation().add(0.5, 0.5, 0.5);
+		if (!isDirectionReadable(b))
+			return l;
 		BlockFace blockFace = Direction.getFacing(b);
 		if (blockFace != BlockFace.SELF) {
 			l.setPitch(Direction.getPitch(Math.asin(blockFace.getModY())));
 			l.setYaw(Direction.getYaw(Math.atan2(blockFace.getModZ(), blockFace.getModX())));
 		}
 		return l;
+	}
+
+	/**
+	 * Whether the block's data can be read without loading a chunk.
+	 * <p>
+	 * Reading the data of a block in an unloaded chunk makes the server load that chunk synchronously,
+	 * stalling the whole main thread. That is far too high a price for the direction of a location,
+	 * which most blocks do not even have, so callers that only want the direction skip it instead.
+	 *
+	 * @param block The block to check.
+	 * @return Whether the block's data is available without a chunk load.
+	 */
+	private static boolean isDirectionReadable(Block block) {
+		// a BlockStateBlock answers from its own snapshot, so it never reaches a chunk
+		// (and an unplaced one has no world to ask about)
+		if (block instanceof BlockStateBlock)
+			return true;
+		World world = block.getWorld();
+		return world.isChunkLoaded(block.getX() >> 4, block.getZ() >> 4);
 	}
 	
 	@Nullable

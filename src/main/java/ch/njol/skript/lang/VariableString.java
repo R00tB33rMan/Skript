@@ -367,12 +367,15 @@ public class VariableString implements Expression<String> {
 
 		Object[] string = this.strings;
 		assert string != null;
+		// the types are only ever read by the default-variables block below, so a string built for
+		// anything else - which is most of them - collects nothing
+		boolean trackTypes = script != null && mode == StringMode.VARIABLE_NAME;
 		StringBuilder builder = new StringBuilder();
-		List<Class<?>> types = new ArrayList<>();
+		List<Class<?>> types = trackTypes ? new ArrayList<>() : null;
 		for (Object object : string) {
 			if (object instanceof Expression<?>) {
 				Object[] objects = ((Expression<?>) object).getArray(event);
-				if (objects != null && objects.length > 0)
+				if (types != null && objects != null && objects.length > 0)
 					types.add(objects[0].getClass());
 				builder.append(Classes.toString(objects, true, mode));
 			} else {
@@ -380,7 +383,7 @@ public class VariableString implements Expression<String> {
 			}
 		}
 		String complete = builder.toString();
-		if (script != null && mode == StringMode.VARIABLE_NAME && !types.isEmpty()) {
+		if (types != null && !types.isEmpty()) {
 			DefaultVariables data = script.getData(DefaultVariables.class);
 			if (data != null)
 				data.add(complete, types.toArray(new Class<?>[0]));

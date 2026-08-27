@@ -89,21 +89,37 @@ public abstract class PropertyBaseExpression<Handler extends ExpressionPropertyH
 
 	@Override
 	protected Object @Nullable [] get(Event event) {
-		return expr.stream(event)
-			.flatMap(source -> {
-				var handler = properties.getHandler(source.getClass());
-				if (handler == null) {
-					return null; // no property info found, skip
+		// a loop rather than a stream pipeline: this runs for every property read in every script,
+		// which made the pipeline machinery itself one of Skript's larger costs in a profile
+		Iterator<?> iterator = expr.iterator(event);
+		if (iterator == null) {
+			return (Object[]) Array.newInstance(getReturnType(), 0);
+		}
+
+		List<Object> values = new ArrayList<>();
+		while (iterator.hasNext()) {
+			Object source = iterator.next();
+			Handler handler = properties.getHandler(source.getClass());
+			if (handler == null) {
+				continue; // no property info found, skip
+			}
+			Object value = convert(event, handler, source);
+			if (value == null) {
+				continue;
+			}
+			// flatten arrays
+			if (value.getClass().isArray()) {
+				for (Object element : (Object[]) value) {
+					if (element != null) {
+						values.add(element);
+					}
 				}
-				var value = convert(event, handler, source);
-				// flatten arrays
-				if (value != null && value.getClass().isArray()) {
-					return Arrays.stream(((Object[]) value));
-				}
-				return Stream.of(value);
-			})
-			.filter(Objects::nonNull)
-			.toArray(size -> (Object[]) Array.newInstance(getReturnType(), size));
+			} else {
+				values.add(value);
+			}
+		}
+
+		return values.toArray((Object[]) Array.newInstance(getReturnType(), values.size()));
 	}
 
 	/**

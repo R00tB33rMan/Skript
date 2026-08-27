@@ -40,6 +40,7 @@ import java.io.*;
 import java.lang.reflect.Array;
 import java.nio.charset.Charset;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 /**
@@ -56,6 +57,18 @@ public abstract class Classes {
 	private final static HashMap<Class<?>, ClassInfo<?>> superClassInfos = new HashMap<>();
 	private final static HashMap<String, ClassInfo<?>> classInfosByCodeName = new HashMap<>();
 	private final static Map<String, List<ClassInfo<?>>> registeredLiteralPatterns = new HashMap<>();
+
+	/**
+	 * The index in {@link #classInfos} of the ClassInfo whose parser renders a given runtime class,
+	 * or {@link #NO_STRING_PARSER} when none of them applies.
+	 * <p>
+	 * Picking one walks every registered ClassInfo in order, and Skript renders values often enough
+	 * that repeating the walk shows up in a profile. The order is fixed once registration closes, so
+	 * the answer depends on the value's class alone.
+	 */
+	private final static Map<Class<?>, Integer> stringParserInfos = new ConcurrentHashMap<>();
+
+	private final static int NO_STRING_PARSER = -1;
 
 	/**
 	 * @param info info about the class to register
@@ -186,6 +199,7 @@ public abstract class Classes {
 		}
 
 		Classes.classInfos = classInfos.toArray(new ClassInfo[classInfos.size()]);
+		stringParserInfos.clear();
 
 		// check for circular dependencies
 		if (!tempClassInfos.isEmpty()) {
@@ -666,17 +680,48 @@ public abstract class Classes {
 			}
 			return "[" + b.toString() + "]";
 		}
-		for (final ClassInfo<?> ci : getClassInfos()) {
-			final Parser<?> parser = ci.getParser();
-			if (parser != null && ci.getC().isInstance(o)) {
-				@SuppressWarnings("unchecked")
-				final String s = mode == StringMode.MESSAGE ? ((Parser<T>) parser).toString(o, flags)
-						: mode == StringMode.DEBUG ? "[" + ci.getCodeName() + ":" + ((Parser<T>) parser).toString(o, mode) + "]"
-								: ((Parser<T>) parser).toString(o, mode);
-				return s;
-			}
+		final ClassInfo<?> ci = getStringParserInfo(o.getClass());
+		if (ci != null) {
+			@SuppressWarnings("unchecked")
+			final Parser<T> parser = (Parser<T>) ci.getParser();
+			assert parser != null;
+			return mode == StringMode.MESSAGE ? parser.toString(o, flags)
+					: mode == StringMode.DEBUG ? "[" + ci.getCodeName() + ":" + parser.toString(o, mode) + "]"
+							: parser.toString(o, mode);
 		}
 		return mode == StringMode.VARIABLE_NAME ? "object:" + o : "" + o;
+	}
+
+	/**
+	 * Finds the first registered ClassInfo, in registration order, that has a parser and accepts
+	 * instances of the given class.
+	 *
+	 * @param type The runtime class of the value being rendered.
+	 * @return That ClassInfo, or null if no registered ClassInfo can render the value.
+	 */
+	@Nullable
+	private static ClassInfo<?> getStringParserInfo(final Class<?> type) {
+		checkAllowClassInfoInteraction();
+		final ClassInfo<?>[] infos = classInfos;
+		if (infos == null)
+			return null;
+
+		final Integer cached = stringParserInfos.get(type);
+		if (cached != null)
+			return cached == NO_STRING_PARSER ? null : infos[cached];
+
+		int index = NO_STRING_PARSER;
+		for (int i = 0; i < infos.length; i++) {
+			final ClassInfo<?> info = infos[i];
+			if (info.getParser() != null && info.getC().isAssignableFrom(type)) {
+				index = i;
+				break;
+			}
+		}
+
+		stringParserInfos.put(type, index);
+
+		return index == NO_STRING_PARSER ? null : infos[index];
 	}
 
 	public static String toString(final Object[] os, final int flags, final boolean and) {

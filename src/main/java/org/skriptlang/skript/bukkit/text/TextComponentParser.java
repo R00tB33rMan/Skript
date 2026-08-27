@@ -2,7 +2,6 @@ package org.skriptlang.skript.bukkit.text;
 
 import ch.njol.skript.Skript;
 import ch.njol.skript.registrations.Classes;
-import ch.njol.util.coll.CollectionUtils;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextReplacementConfig;
 import net.kyori.adventure.text.event.ClickEvent;
@@ -28,6 +27,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -276,6 +276,10 @@ public final class TextComponentParser {
 				resolvers.add((TagResolver) handle.invoke());
 			} catch (Throwable ignored) { }
 		}
+		// MiniMessage asks has() about every tag candidate in every message it parses, so this is one
+		// of the hottest methods in the whole parser - it walks a plain array and a hash lookup rather
+		// than building a stream per question
+		Set<String> safeTagNames = new HashSet<>(Arrays.asList(safeTags));
 		// create new resolver
 		safeTagResolver = new TagResolver() {
 			@Override
@@ -288,7 +292,12 @@ public final class TextComponentParser {
 
 			@Override
 			public boolean has(@NotNull String name) {
-				return resolvers.stream().anyMatch(resolver -> resolver.has(name)) || CollectionUtils.contains(safeTags, name);
+				for (TagResolver resolver : resolvers) {
+					if (resolver.has(name)) {
+						return true;
+					}
+				}
+				return safeTagNames.contains(name);
 			}
 		};
 	}

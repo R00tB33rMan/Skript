@@ -213,6 +213,9 @@ public abstract class Task implements Runnable, Closeable {
 			} catch (final Exception e) {
 				Skript.exception(e);
 			}
+			// the call already happened on the right thread - falling through would schedule it a
+			// second time, so a trigger that threw would run twice
+			return null;
 		}
 		final Future<T> f = Bukkit.getScheduler().callSyncMethod(p, c);
 		try {

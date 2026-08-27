@@ -378,6 +378,12 @@ public class ItemData implements Cloneable, YggdrasilExtendedSerializable {
 	 * Lowest is {@link MatchQuality#SAME_MATERIAL}.
 	 */
 	private static MatchQuality compareItemMetas(ItemMeta first, ItemMeta second) {
+		// Identical metas agree on every field checked below and on the stripped comparison that
+		// closes this method, so they can only come out EXACT. Answering here skips building two
+		// legacy display names, two lore lists and two clones for the commonest case there is.
+		if (first.equals(second))
+			return MatchQuality.EXACT;
+
 		MatchQuality quality = MatchQuality.EXACT; // Lowered as we go on
 		MatchQuality newQuality; // Used to prevent upgrading the quality
 		

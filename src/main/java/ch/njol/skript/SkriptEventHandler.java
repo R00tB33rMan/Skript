@@ -18,6 +18,7 @@ import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.Map.Entry;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public final class SkriptEventHandler {
@@ -61,18 +62,60 @@ public final class SkriptEventHandler {
 	private static final Multimap<Class<? extends Event>, Trigger> triggers = ArrayListMultimap.create();
 
 	/**
+	 * The resolved result of {@link #resolveTriggers(Class)} per Event class.
+	 * <p>
+	 * Resolving walks every registered Event class, so doing it per dispatch is one of the most
+	 * expensive things Skript does on a busy server. The answer only changes when a Trigger is
+	 * registered or unregistered, which is when {@link #triggers} is written, so the cache is
+	 * dropped there instead.
+	 */
+	private static volatile Map<Class<? extends Event>, List<Trigger>> triggerCache = new ConcurrentHashMap<>();
+
+	/**
+	 * Drops every cached resolution, so the next dispatch of each Event class resolves again.
+	 * <p>
+	 * The cache is replaced rather than cleared: a dispatch that is already resolving publishes into
+	 * the map it read, which is the discarded one, so it cannot leave a stale entry behind. Callers
+	 * must invalidate <i>after</i> writing {@link #triggers}, as the volatile write is what publishes
+	 * that change to a concurrent dispatch.
+	 */
+	private static void invalidateTriggerCache() {
+		triggerCache = new ConcurrentHashMap<>();
+	}
+
+	/**
 	 * A utility method to get all Triggers registered under the provided Event class.
 	 * @param event The event to find pairs from.
-	 * @return A List containing all Triggers registered under the provided Event class.
+	 * @return An immutable List containing all Triggers registered under the provided Event class.
 	 */
 	private static List<Trigger> getTriggers(Class<? extends Event> event) {
+		Map<Class<? extends Event>, List<Trigger>> cache = triggerCache;
+		List<Trigger> cached = cache.get(event);
+		if (cached != null)
+			return cached;
+
+		// resolved outside computeIfAbsent so no map bin is locked while getHandlerList takes its own
+		// lock, and so a second dispatch of the same event resolves rather than waits - the result is
+		// the same either way
+		List<Trigger> resolved = resolveTriggers(event);
+		List<Trigger> raced = cache.putIfAbsent(event, resolved);
+
+		return raced != null ? raced : resolved;
+	}
+
+	/**
+	 * Collects every Trigger that the provided Event class should run, ignoring {@link #triggerCache}.
+	 * @param event The event to find pairs from.
+	 * @return An immutable List containing all Triggers registered under the provided Event class.
+	 */
+	private static List<Trigger> resolveTriggers(Class<? extends Event> event) {
 		HandlerList eventHandlerList = getHandlerList(event);
 		assert eventHandlerList != null; // It had one at some point so this should remain true
 		return triggers.asMap().entrySet().stream()
 				.filter(entry -> entry.getKey().isAssignableFrom(event) && getHandlerList(entry.getKey()) == eventHandlerList)
 				.flatMap(entry -> entry.getValue().stream())
 				.distinct()
-				.collect(Collectors.toList()); // forces evaluation now and prevents us from having to call getTriggers again if very high logging is enabled
+				.collect(Collectors.toUnmodifiableList());
 	}
 
 	/**
@@ -202,9 +245,10 @@ public final class SkriptEventHandler {
 	 * @param priority The priority of the Event.
 	 */
 	public static void logEventStart(Event event, @Nullable EventPriority priority) {
-		startEvent = System.nanoTime();
+		// the clock is only read when it will be reported - logEventEnd bails on the same condition
 		if (!Skript.logVeryHigh())
 			return;
+		startEvent = System.nanoTime();
 		Skript.info("");
 
 		String message = "== " + event.getClass().getName();
@@ -237,9 +281,10 @@ public final class SkriptEventHandler {
 	 * @param trigger The Trigger that execution has begun for.
 	 */
 	public static void logTriggerStart(Trigger trigger) {
-		startTrigger = System.nanoTime();
+		// the clock is only read when it will be reported - logTriggerEnd bails on the same condition
 		if (!Skript.logVeryHigh())
 			return;
+		startTrigger = System.nanoTime();
 		Skript.info("# " + trigger.getName());
 	}
 
@@ -288,6 +333,7 @@ public final class SkriptEventHandler {
 			return;
 
 		triggers.put(event, trigger);
+		invalidateTriggerCache();
 
 		EventPriority priority = trigger.getEvent().getEventPriority();
 
@@ -311,6 +357,7 @@ public final class SkriptEventHandler {
 
 			// Remove the trigger from the map
 			entryIterator.remove();
+			invalidateTriggerCache();
 
 			// check if we can unregister the listener
 			EventPriority priority = trigger.getEvent().getEventPriority();

@@ -4,7 +4,6 @@ import ch.njol.skript.Skript;
 import ch.njol.skript.SkriptAPIException;
 import ch.njol.skript.registrations.Classes;
 import ch.njol.skript.util.Utils;
-import ch.njol.util.Pair;
 import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 import org.skriptlang.skript.lang.converter.Converter;
@@ -13,9 +12,9 @@ import org.skriptlang.skript.lang.converter.Converters;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Comparators are used to provide Skript with specific instructions for comparing two objects.
@@ -58,7 +57,17 @@ public final class Comparators {
 	 * Some pairs may point to a null value, indicating that no comparator exists between the two types.
 	 * This is useful for skipping complex lookups that may require conversion and inversion.
 	 */
-	private static final Map<Pair<Class<?>, Class<?>>, ComparatorInfo<?, ?>> QUICK_ACCESS_COMPARATORS = new HashMap<>(50);
+	private static final Map<Class<?>, Map<Class<?>, ComparatorInfo<?, ?>>> QUICK_ACCESS_COMPARATORS = new ConcurrentHashMap<>(50);
+
+	/**
+	 * Stands in for "no comparator exists between these two types" in {@link #QUICK_ACCESS_COMPARATORS},
+	 * which cannot hold a null value. It is never returned to a caller and never invoked.
+	 */
+	private static final ComparatorInfo<?, ?> NO_COMPARATOR = new ComparatorInfo<>(
+		Object.class,
+		Object.class,
+		(o1, o2) -> Relation.NOT_EQUAL
+	);
 
 	/**
 	 * Registers a new Comparator with Skript's collection of Comparators.
@@ -182,19 +191,17 @@ public final class Comparators {
 	public static <T1, T2> ComparatorInfo<T1, T2> getComparatorInfo(Class<T1> firstType, Class<T2> secondType) {
 		assertIsDoneLoading();
 
-		Pair<Class<?>, Class<?>> pair = new Pair<>(firstType, secondType);
-		ComparatorInfo<T1, T2> comparator;
+		// nested rather than keyed by a pair so that a hit - which is nearly every call - allocates nothing
+		Map<Class<?>, ComparatorInfo<?, ?>> bySecondType =
+			QUICK_ACCESS_COMPARATORS.computeIfAbsent(firstType, type -> new ConcurrentHashMap<>());
 
-		synchronized (QUICK_ACCESS_COMPARATORS) {
-			if (QUICK_ACCESS_COMPARATORS.containsKey(pair)) {
-				comparator = (ComparatorInfo<T1, T2>) QUICK_ACCESS_COMPARATORS.get(pair);
-			} else { // Compute QUICK_ACCESS for provided types
-				comparator = getComparatorInfo_i(firstType, secondType);
-				QUICK_ACCESS_COMPARATORS.put(pair, comparator);
-			}
+		ComparatorInfo<?, ?> comparator = bySecondType.get(secondType);
+		if (comparator == null) { // Compute QUICK_ACCESS for provided types
+			comparator = getComparatorInfo_i(firstType, secondType);
+			bySecondType.put(secondType, comparator == null ? NO_COMPARATOR : comparator);
 		}
 
-		return comparator;
+		return comparator == NO_COMPARATOR ? null : (ComparatorInfo<T1, T2>) comparator;
 	}
 
 	/**

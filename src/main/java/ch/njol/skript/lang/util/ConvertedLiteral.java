@@ -56,6 +56,11 @@ public class ConvertedLiteral<F, T> extends ConvertedExpression<F, T> implements
 	}
 
 	@Override
+	public T[] getAll(Event event) {
+		return getAll();
+	}
+
+	@Override
 	public T getSingle() {
 		if (getAnd() && data.length > 1)
 			throw new SkriptAPIException("Call to getSingle on a non-single expression");
